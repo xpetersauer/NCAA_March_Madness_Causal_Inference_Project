@@ -1,0 +1,855 @@
+---
+title: "March Madness Analysis"
+author: "Peter Sauer"
+date: "2023-04-17"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+library(mltools)
+library(cem)
+library(randChecks)
+library(tidyverse)
+library(MatchIt)
+library(kableExtra)
+library(sensitivitymw)
+library(lmtest)
+library(sandwich)
+library(mgcv)
+
+
+```
+
+
+```{r}
+# T1 Seed = Lower Seed; T2 = Higher Seed
+# you'll need to update the path directory here:
+marchMadnessData.raw = read.csv("/Users/psauer/Downloads/mensMarchMadnessDataAllRounds.csv")
+marchMadnessData.raw = marchMadnessData.raw[, 2:ncol(marchMadnessData.raw)] %>% 
+  filter(T1_Seed < T2_Seed) %>% 
+  filter(T2_Seed != 16) %>% 
+  filter(!(T1_Seed == 10 & T2_Seed == 15) & !(T1_Seed == 11 & T2_Seed == 14) & !(T1_Seed == 6 & T2_Seed == 14)) %>% # filter out matchups where there has not been at least one win and loss
+  mutate(seed.differential = T2_Seed - T1_Seed) %>% 
+  filter(DayNum < 141) # 141 ==> up to Round of 32
+head(marchMadnessData.raw)
+```
+
+```{r}
+
+marchMadnessData.raw.determine.win.streak.median = marchMadnessData.raw %>% 
+  filter(T1_Seed + T2_Seed == 17)
+win_streaks = c(marchMadnessData.raw.determine.win.streak.median$T1_win_streak, marchMadnessData.raw.determine.win.streak.median$T2_win_streak)
+win_streaks_nonzero = win_streaks[which(win_streaks != 0)]
+
+df.tmp = data.frame(nonzero.win.streak = win_streaks_nonzero)
+
+df.tmp %>% 
+  ggplot(aes(x = nonzero.win.streak)) +
+  geom_histogram(fill = "lightgrey") +
+  theme_bw() +
+  geom_vline(xintercept = median(win_streaks_nonzero), linetype="dashed", 
+                color = "red", size=1.5) +
+  scale_y_continuous(expand=c(0,0),
+                     limits = c(0,1.05*max(as.numeric(table(win_streaks_nonzero)))))+
+  labs(x = "Non-zero Win Streak", title = "Histogram of Non-zero win streaks",
+       subtitle = "The Red Line Represent the Median Non-zero Win Streak = 5")
+  
+```
+
+```{r}
+marchMadnessData.eda = marchMadnessData.raw %>% 
+  mutate(is.upset = ifelse(PointDiff < 0, 1, 0),
+         T1_hot_streak = ifelse(T1_win_streak > median(win_streaks_nonzero), 1, 0),
+         T2_hot_streak = ifelse(T2_win_streak > median(win_streaks_nonzero), 1, 0),
+         seed.differential = factor(as.character(seed.differential),
+                                    levels = 1:15),
+         higher.seed.hot = ifelse(T2_hot_streak == 1, "Higher Seed is Hot", "Higher Seed is Not Hot"),
+         lower.seed.hot = ifelse(T1_hot_streak == 1, "Lower Seed is Hot", "Lower Seed is Not Hot"),
+         is.upset.fill = ifelse(PointDiff < 0, "Upset", "Favorite")) %>% # could be >= or >
+  select(-c(DayNum, Season, T1_TeamID, T2_TeamID)) %>% 
+  mutate(hot.streak.category = factor(case_when(T1_hot_streak == 1 & T2_hot_streak == 1 ~ "both.hot",
+                                         T1_hot_streak == 1 & T2_hot_streak == 0 ~ "higher.seed.only.hot",
+                                         T1_hot_streak == 0 & T2_hot_streak == 1 ~ "lower.seed.only.hot",
+                                         T1_hot_streak == 0 & T2_hot_streak == 0 ~ "neither.seed.hot"),
+                                      levels = c("neither.seed.hot", "higher.seed.only.hot", "both.hot", "lower.seed.only.hot")))
+
+marchMadnessData.summary.hot.streak.category = marchMadnessData.eda %>% 
+  group_by(hot.streak.category) %>% 
+  summarise(n = n(), PointDiff = mean(PointDiff)) %>% 
+  mutate(n_label = paste0("n = ", n))
+
+marchMadnessData.summary.seed.differential = marchMadnessData.eda %>% 
+  group_by(seed.differential) %>% 
+  summarise(n = n(), PointDiff = mean(PointDiff)) %>% 
+  mutate(n_label = paste0("n = ", n))
+  
+marchMadnessData.eda %>% 
+  ggplot(aes(x=hot.streak.category, y=PointDiff, fill = hot.streak.category)) + 
+  geom_hline(yintercept = 0) +
+  geom_violin(trim = T) +
+  scale_fill_brewer(palette="Dark2") +
+  geom_boxplot(width = 0.2, fill="white") +
+  geom_label(data=marchMadnessData.summary.hot.streak.category ,aes(x = hot.streak.category, y = PointDiff, label=n_label),nudge_y = 60, fontface =2, size = 5) +
+  scale_x_discrete(labels=c('Neither Seed Hot', 'Higher Seed Hot', 'Both Seeds Hot', "Lower Seed Hot")) + 
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(x = "Hot Streak Category", y = "Point Differential", title = "Point Differential is the Same Regardless of Hot Streak")
+
+marchMadnessData.eda %>% 
+  ggplot(aes(x=seed.differential, y=PointDiff, group = seed.differential, fill = seed.differential)) +
+  geom_hline(yintercept = 0) +
+  geom_violin(trim = T) +
+  scale_fill_brewer(palette="Dark2") +
+  geom_boxplot(width = 0.3, fill="white") +
+  geom_label(data=marchMadnessData.summary.seed.differential, aes(x = seed.differential, y = PointDiff, label=n_label),nudge_y = 60, fontface =2, size = 5) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(x = "Seed Differential", y = "Point Differential", title = "Point Differential Increases As Seed Increases", subtitle = "Different Seed Differentials Come From Either the Round of 64 or Round of 32")
+
+
+```
+
+```{r}
+marchMadnessData.eda %>% 
+  ggplot(aes(x=seed.differential, y=PointDiff, fill=higher.seed.hot)) +
+  geom_boxplot()+
+  theme_bw()+
+  theme(legend.title = element_blank()) +
+  labs(x = "Seed Differential", y = "Point Differential", title = "Point Differential By Seed, When Observing Whether the Lower Seed is Hot,\nShows Some Inconsistencies")
+
+```
+
+```{r}
+# marchMadnessData.eda %>% 
+#   filter( (T1_Conference != "caa") & (T1_Conference != "big_west") & (T1_Conference != "horizon")
+#           & (T1_Conference != "mac") & (T1_Conference != "ovc") & (T1_Conference != "southern")
+#           & (T1_Conference != "sun_belt") & (T1_Conference != "wac")) %>% # filter conferences where there are not enough datapoints for both groups for a boxplot (Hot/Not Hot) 
+#   ggplot(aes(x=T1_Conference, y=PointDiff, fill=higher.seed.hot)) +
+#   geom_hline(yintercept = 0) +
+#   geom_boxplot()+
+#   theme_bw()+
+#   theme(legend.title = element_blank(), axis.text.x = element_text(angle = 90, vjust = 0.4)) +
+#   labs(x = "Lower Seed's Conference", y = "Point Differential", title = "No Conclusions Are Obvious Regarding Hot, Higher Seeds", subtitle = "In this Context, We Want a LOWER Point Differential (Insinuating the Higher Seed Won)")
+# marchMadnessData.eda %>% 
+#   filter((T2_Conference != "aac") & (T2_Conference != "acc") & (T2_Conference != "big_east")  & (T2_Conference != "big_ten") 
+#           & (T2_Conference != "big_twelve") & (T2_Conference != "meac") & (T2_Conference != "mid_cont")
+#           & (T2_Conference != "nec")  & (T2_Conference != "pac_twelve")  & (T2_Conference != "swac")) %>% 
+#   # filter((T2_Conference != "swac") & (T2_Conference != "summit") & (T2_Conference != "southland") & (T2_Conference != "patriot")
+#   #        & (T2_Conference != "pac_ten") & (T2_Conference != "ovc") & (T2_Conference != "mid_cont") & (T2_Conference != "nec")
+#   #        & (T2_Conference != "southern") & (T2_Conference != "big_east") & (T2_Conference != "meac") & (T2_Conference != "caa")
+#   #        & (T2_Conference != "a_sun") & (T2_Conference != "aec")) %>% # filter conferences where there are not enough datapoints for both groups for a boxplot (Hot/Not Hot) 
+#   ggplot(aes(x=T2_Conference, y=PointDiff, fill=higher.seed.hot)) +
+#   geom_hline(yintercept = 0) +
+#   geom_boxplot()+
+#   theme_bw()+
+#   theme(legend.title = element_blank(), axis.text.x = element_text(angle = 90, vjust = 0.4)) +
+#   labs(x = "Higher Seed's Conference", y = "Point Differential", title = "Hot, High Seeds, When Grouped By Conference, Tend to Perform Better", subtitle = "In this Context, We Want a LOWER Point Differential (Insinuating the Higher Seed Won)")
+
+```
+
+```{r}
+seed_matchups = marchMadnessData.raw %>% 
+  mutate(t1_win = ifelse(PointDiff > 0, 1,0),
+         t2_win = ifelse(PointDiff < 0, 1,0)) %>% 
+  select(T1_Seed, T2_Seed, t1_win, t2_win) %>% 
+  group_by(T1_Seed, T2_Seed) %>% 
+  summarise(win = sum(t1_win), loss = sum(t2_win)) %>% 
+  mutate(win_percent = round(win/(win+loss), digits = 3) * 100) %>% 
+  arrange(desc(win_percent))
+seed_matchups %>% 
+  kbl(caption = "Seed Matchups") %>% 
+  kable_paper("hover", full_width = F)
+
+
+
+```
+
+```{r}
+library(data.table)
+
+zero_entries_above_threshold = function(col, threshold = 10){
+  return(length(which(col != 0)) >= threshold)
+}
+marchMadnessData.no_reduction = marchMadnessData.eda %>% 
+  mutate(higher.seed.hot = as.integer(ifelse((higher.seed.hot == "Higher Seed is Hot"), 1, 0)), # our treatment
+         lower.seed.hot = as.integer(ifelse((lower.seed.hot == "Lower Seed is Hot"), 1, 0))) %>% 
+  select(-c(is.upset, is.upset.fill, hot.streak.category, T1, T2, T1_win_streak, T2_win_streak, T1_hot_streak, T2_hot_streak)) %>%
+  select(-c(T1_FTM, T2_FTM, T1_Opp_FTM, T2_Opp_FTM, T1_FGM2, T1_FGA2, T2_FGM2, T2_FGA2,
+            T1_Opp_FGM2, T1_Opp_FGA2, T2_Opp_FGM2, T2_Opp_FGA2, T1_FTA, T2_FTA, T1_Opp_FTA, T2_Opp_FTA, seed.differential)) %>% # remove variates that are linear combinations of others
+  mutate(T1_Conference = as.factor(T1_Conference), T2_Conference = as.factor(T2_Conference)) 
+
+marchMadnessData.no_reduction.favorite_dominant = marchMadnessData.no_reduction %>% 
+  filter((T1_Seed == 2 & T2_Seed == 15) | (T1_Seed == 1 & T2_Seed == 9) | (T1_Seed == 5 & T2_Seed == 13)
+| (T1_Seed == 3 & T2_Seed == 14) | (T1_Seed == 1 & T2_Seed == 8))
+
+marchMadnessData.no_reduction.unlikely_but_possible = marchMadnessData.no_reduction %>% 
+  filter((T1_Seed == 4 & T2_Seed == 13) | (T1_Seed == 4 & T2_Seed == 12) | (T1_Seed == 3 & T2_Seed == 6) | (T1_Seed == 12 & T2_Seed == 13) | (T1_Seed == 2 & T2_Seed == 10))
+marchMadnessData.no_reduction.upset_reachable = marchMadnessData.no_reduction %>% 
+  filter((T1_Seed == 2 & T2_Seed == 7) | (T1_Seed == 7 & T2_Seed == 10) | (T1_Seed == 5 & T2_Seed == 12) | (T1_Seed == 3 & T2_Seed == 11) | (T1_Seed == 6 & T2_Seed == 11) | (T1_Seed == 8 & T2_Seed == 9) | (T1_Seed == 4 & T2_Seed == 5) | (T1_Seed == 7 & T2_Seed == 15) | (T1_Seed == 4 & T2_Seed == 13) | (T1_Seed == 4 & T2_Seed == 12) | (T1_Seed == 3 & T2_Seed == 6) | (T1_Seed == 12 & T2_Seed == 13) | (T1_Seed == 2 & T2_Seed == 10))
+
+marchMadnessData.all_seeds = marchMadnessData.no_reduction %>% 
+  mutate(seed.differential = T2_Seed - T1_Seed,
+         T2_Seed = as.factor(T2_Seed),
+         T1_Seed = as.factor(T1_Seed))
+
+marchMadnessData.no_reduction.favorite_dominant = one_hot(as.data.table(marchMadnessData.no_reduction.favorite_dominant))
+rownames(marchMadnessData.no_reduction.favorite_dominant) <- 1:nrow(marchMadnessData.no_reduction.favorite_dominant)
+marchMadnessData.no_reduction.favorite_dominant = marchMadnessData.no_reduction.favorite_dominant %>% 
+  select_if(zero_entries_above_threshold)
+
+marchMadnessData.no_reduction.unlikely_but_possible = one_hot(as.data.table(marchMadnessData.no_reduction.unlikely_but_possible))
+rownames(marchMadnessData.no_reduction.unlikely_but_possible) <- 1:nrow(marchMadnessData.no_reduction.unlikely_but_possible)
+marchMadnessData.no_reduction.unlikely_but_possible = marchMadnessData.no_reduction.unlikely_but_possible %>% 
+  select_if(zero_entries_above_threshold)
+
+marchMadnessData.no_reduction.upset_reachable = one_hot(as.data.table(marchMadnessData.no_reduction.upset_reachable))
+rownames(marchMadnessData.no_reduction.upset_reachable) <- 1:nrow(marchMadnessData.no_reduction.upset_reachable)
+marchMadnessData.no_reduction.upset_reachable = marchMadnessData.no_reduction.upset_reachable %>% 
+  select_if(zero_entries_above_threshold)
+
+marchMadnessData.all_seeds = one_hot(as.data.table(marchMadnessData.all_seeds))
+rownames(marchMadnessData.all_seeds) <- 1:nrow(marchMadnessData.all_seeds)
+marchMadnessData.all_seeds = marchMadnessData.all_seeds %>% 
+  select_if(zero_entries_above_threshold)
+
+```
+
+# Dimension Reduction
+
+```{r}
+# library(corrplot)
+
+pca_filter = function(dataset,visualize = FALSE, percent_var = 0.7){
+  marchMadnessData.covariates = dataset %>% 
+    select(-c(PointDiff, higher.seed.hot)) %>% 
+    select_if(is.numeric)
+  pca_results = prcomp(marchMadnessData.covariates, scale = TRUE)
+  
+  
+  #calculate total variance explained by each principal component
+  var_explained = pca_results$sdev^2 / sum(pca_results$sdev^2)
+  
+  
+  # we want the number of covariates s.t. a certain % of the variance is explained:
+  sum(var_explained)
+  summing = 0
+  summing_i = -1
+  for (i in 1:length(var_explained)){
+    summing = summing + var_explained[i]
+    if (summing >= percent_var){
+      print(i)
+      summing_i = i
+      break
+    }
+  }
+  print(summing_i)
+  if (visualize == TRUE){
+    vis.df = data.frame(pcs = c(1:length(var_explained)), var_exp = var_explained)
+    print(vis.df)
+    print(vis.df %>% 
+      ggplot(aes(x = pcs, y = var_exp)) + 
+      geom_line() + 
+      labs(x = "Principal Component", y = "Variance Explained", title = "Scree Plot For March Madness Data") +
+      ylim(0,1) +
+      geom_vline(xintercept =summing_i, linetype="dashed", 
+                color = "red", size=1)  +
+      theme_bw()
+    )
+  }
+  
+  return(data.frame(pca_results$x[,1:summing_i]))
+}
+
+
+# #the covariates are:
+# marchMadnessData.all_seeds.X = subset(marchMadnessData.all_seeds, select = -c(PointDiff, higher.seed.hot))
+# #now center the covariates
+# centerVec = function(x){
+# 	return(x - mean(x))
+# }
+# X.cent = apply(marchMadnessData.all_seeds.X, MARGIN = 2, FUN = centerVec)
+# #the interaction terms are:
+# X.cent.intZ = marchMadnessData.all_seeds$higher.seed.hot*X.cent
+# #create the dataset
+# marchMadnessData.all_seeds.int = data.frame(higher.seed.hot = marchMadnessData.all_seeds$higher.seed.hot,
+# 	PointDiff = marchMadnessData.all_seeds$PointDiff, marchMadnessData.all_seeds.X, X.cent.intZ)
+
+marchMadnessData.all_seeds.pca_filtered = pca_filter(marchMadnessData.all_seeds, visualize = TRUE)
+```
+
+```{r}
+causal_inference_analysis = function(dataset.chosen, original.dataset, best.matched = NULL, 
+                                     want.matched.data = FALSE, 
+                                     want.ipw = FALSE, 
+                                     want.db = FALSE, 
+                                     treatment_control_ratio = 1){
+  if(is.null(best.matched)){
+    error("best.matched needs to be asserted")
+  }
+  marchMadnessData = dataset.chosen %>% 
+    mutate(PointDiff = original.dataset$PointDiff,  
+           higher.seed.hot = as.numeric(original.dataset$higher.seed.hot)) 
+  print(summary(marchMadnessData$higher.seed.hot))
+  
+  log.model.ps = glm(higher.seed.hot ~ .-PointDiff, data = marchMadnessData, family = "binomial")
+  psEst = predict(log.model.ps, type = "response")
+  
+  # Trimming:
+
+  psEst.t = psEst[marchMadnessData$higher.seed.hot == 1]
+  #the estimated propensity scores just for the control group are:
+  psEst.c = psEst[marchMadnessData$higher.seed.hot == 0]
+  
+  min.common_support = max(min(psEst.t), min(psEst.c))
+  max.common_support = min(max(psEst.t), max(psEst.c))
+  
+  psInsideCommonSupport_i = as.numeric(which(psEst > min.common_support & psEst < max.common_support))
+  marchMadnessData.trimmed = marchMadnessData[psInsideCommonSupport_i,]
+  
+
+  # Optimal:
+  ratio_amount = treatment_control_ratio
+  
+  match.data.object = matchit(formula = higher.seed.hot ~ .-PointDiff,
+                                data = marchMadnessData.trimmed,
+                                method = "optimal",
+                                ratio = ratio_amount, 
+                                distance = "glm",
+                                link = "logit")
+  matchedData.11.trimmed = match.data(match.data.object)
+  
+
+  
+  # subclasses.outside.support = c(matchedData.11$subclass[matchedData.11$distance < min.common_support],
+  #                                matchedData.11$subclass[matchedData.11$distance > max.common_support])
+  # 
+  # matchedData.11.trimmed = matchedData.11[!(matchedData.11$subclass %in% subclasses.outside.support),]
+  # Nearest w/ caliper w/std deviation:
+  
+  match.data.object.caliper = matchit(formula = higher.seed.hot ~ .-PointDiff,
+                                data = marchMadnessData.trimmed,
+                                method = "nearest",
+                                ratio = ratio_amount, 
+                                distance = "glm",
+                                link = "logit",
+                                caliper = 0.1,
+                                std.caliper = TRUE)
+  
+  matchedData.11.nearest.std = match.data(match.data.object.caliper)
+  
+  print("number of treatment samples for trimmed and caliper-matched samples:")
+  print(nrow(matchedData.11.trimmed)/(ratio_amount+1))
+  print(nrow(matchedData.11.nearest.std)/(ratio_amount+1))
+
+
+  getWeightedSCMDs = function(X, indicator, weights){
+  
+    weighted_SCMDs = apply(X, MARGIN = 2, FUN = function(covariate){
+  
+      covariate_treat = covariate[which(indicator == 1)]
+      covariate_control = covariate[which(indicator == 0)]
+      
+      pooled_sd = sqrt((var(covariate_treat)+var(covariate_control))/2)
+      treated_mean = sum(indicator * covariate * weights) / sum(indicator * weights)
+      controlled_mean = sum(abs(1-indicator) * covariate * weights) / sum(abs(1-indicator) * weights)
+      
+      
+      scmd =  (treated_mean - controlled_mean) / pooled_sd
+      return(scmd)
+    })
+    return(weighted_SCMDs)
+    
+  }
+  
+  fullData.covariates = dataset.chosen
+  indicator = marchMadnessData$higher.seed.hot
+  psWeights = indicator/psEst + (1-indicator)/(1-psEst)
+  
+  #produce the weighted SCMD from IPW here:
+  covMeanDiffs.ipw = getWeightedSCMDs(X = fullData.covariates, 
+                                      indicator = indicator,
+                                      weights = psWeights)
+  quantile_99 = quantile(psWeights, probs = c(0.99))[[1]]
+  trunc_i = which(psWeights > quantile_99)
+  
+  psWeights.trunc = psWeights
+  psWeights.trunc[trunc_i] = quantile_99
+  
+  covMeanDiffs.trunc = getWeightedSCMDs(X = fullData.covariates, 
+                                        indicator = indicator, 
+                                        weights = psWeights.trunc)
+  
+  
+  trimmed_i = which(psEst >= 0.1 & psEst <= 0.9)
+  treat_trimmed_weights = indicator[trimmed_i]/psEst[trimmed_i]
+  control_trimmed_weights = (1-indicator[trimmed_i])/(1-psEst[trimmed_i])
+  psWeights.trimmed =  treat_trimmed_weights + control_trimmed_weights
+  covMeanDiffs.trimmed = getWeightedSCMDs(X = fullData.covariates[trimmed_i,], 
+                                          indicator = indicator[trimmed_i], 
+                                          weights = psWeights.trimmed)
+  
+  
+  getIPW.CIs.and.est = function(y.variate, indicator, estimates, weights, dataset){
+    est = mean(indicator*y.variate/estimates - (1-indicator)*y.variate/(1-estimates))
+    lin_reg_ipw = lm(PointDiff ~ higher.seed.hot, data = dataset, weights = weights)
+    ipw_std_error = coeftest(lin_reg_ipw, vcov = vcovHC(lin_reg_ipw, type = "HC2"))[2,2]
+    low_ci = est - qnorm(0.975) * ipw_std_error
+    high_ci = est+qnorm(0.975) * ipw_std_error
+    return(c("est" = est, "low_ci" = low_ci, "high_ci" = high_ci))
+  }
+  
+  ipw.est.and.ci = getIPW.CIs.and.est(y.variate = marchMadnessData$PointDiff, indicator = indicator, 
+                     estimates = psEst, weights = psWeights, dataset = marchMadnessData)
+  ipw.est.and.ci.trunc = getIPW.CIs.and.est(y.variate = marchMadnessData$PointDiff, indicator = indicator, 
+                     estimates = psEst, weights = psWeights.trunc, dataset = marchMadnessData)
+  ipw.est.and.ci.trimmed = getIPW.CIs.and.est(y.variate = marchMadnessData$PointDiff[trimmed_i], indicator = indicator[trimmed_i], 
+                     estimates = psEst[trimmed_i], weights = psWeights.trimmed, dataset = marchMadnessData[trimmed_i,])
+  print("IPW, IPW_Trunc, and IPW_Trimmed CI + Est:")
+  print(ipw.est.and.ci)
+  print(ipw.est.and.ci.trunc)
+  print(ipw.est.and.ci.trimmed)
+
+  marchMadnessData.covariates = marchMadnessData.trimmed %>% 
+    select(-c(higher.seed.hot, PointDiff)) %>% 
+    select_if((is.numeric))
+  
+  matchedData.11.trimmed.covariates = matchedData.11.trimmed %>% 
+    select(c(colnames(marchMadnessData.covariates))) %>% 
+    select_if((is.numeric))
+  
+  matchedData.11.nearest.std.covariates = matchedData.11.nearest.std %>% 
+    select(c(colnames(marchMadnessData.covariates))) %>% 
+    select_if((is.numeric))
+
+
+  getStandMeanDiffs = function(covariate_matrix, treatment_vector){
+    # we assume that:
+    # a: the covariate matrix is simply the matrix of covariates
+    # b: the treatment vector is a vector of 1s and 0s indicating whether the *row* 
+    # is in the treatment
+    dataset_df = data.frame(covariate_matrix) %>% 
+      mutate(treat = treatment_vector)
+    
+    dataset_df_treat = dataset_df %>% 
+      filter(treat == 1) %>% 
+      select(-c(treat))
+    
+    dataset_df_control = dataset_df %>% 
+      filter(treat == 0) %>% 
+      select(-c(treat))
+    
+    covariate_stat = apply(dataset_df_treat, MARGIN = 2, FUN = mean) - apply(dataset_df_control, MARGIN = 2, FUN = mean)
+    
+    pooled_standardization = ((apply(dataset_df_treat, MARGIN = 2, FUN = var) + apply(dataset_df_control, MARGIN = 2, FUN = var))/2)^0.5
+    
+    standardized_mds = covariate_stat / pooled_standardization
+    
+    return(standardized_mds)
+  }
+  
+  std.cov.vals.unmatched = getStandMeanDiffs(marchMadnessData.covariates, marchMadnessData.trimmed$higher.seed.hot)
+  
+  std.cov.vals.trim.matched.11 = getStandMeanDiffs(matchedData.11.trimmed.covariates, matchedData.11.trimmed$higher.seed.hot)
+  
+  std.cov.vals.caliper.11 = getStandMeanDiffs(matchedData.11.nearest.std.covariates, matchedData.11.nearest.std$higher.seed.hot)
+
+  print("std.cov.mean.diffs for unmatched, trimmed-matched, caliper, ipw, ipw-trunc, and ipw-trimmed abs-sums")
+  print(sum(abs(std.cov.vals.unmatched)))
+  print(sum(abs(std.cov.vals.trim.matched.11))) # despite the difference, we pick the optimal matching scheme w/ trimming because it has the most control variates
+  print(sum(abs(std.cov.vals.caliper.11)))
+  print(sum(abs(covMeanDiffs.ipw)))
+  print(sum(abs(covMeanDiffs.trunc)))
+  print(sum(abs(covMeanDiffs.trimmed)))
+  
+
+  stopifnot(length(std.cov.vals.unmatched) == length(covMeanDiffs.ipw) & 
+              length(covMeanDiffs.ipw) == length(covMeanDiffs.trunc) &
+              length(covMeanDiffs.trunc) == length(covMeanDiffs.trimmed) & 
+              length(covMeanDiffs.trimmed) == length(std.cov.vals.trim.matched.11) &
+              length(std.cov.vals.trim.matched.11) == length(std.cov.vals.caliper.11))
+  stopifnot(!("PointDiff" %in% names(std.cov.vals.unmatched)))
+  
+  lovePlotCompare(X1 = matchedData.11.trimmed.covariates, indicator1 = matchedData.11.trimmed$higher.seed.hot,
+                  X2 = matchedData.11.nearest.std.covariates, indicator2 = matchedData.11.nearest.std$higher.seed.hot, 
+                  dataNames = c("1:1 Opt. Match", "1:1 0.1 Std. Dev. Cal."))
+  plot(std.cov.vals.unmatched, 1:length(std.cov.vals.unmatched),
+      xlab = "Standardized Covariate Mean Differences", ylab = "", main = "", yaxt = "n",
+      pch = 16)
+  points(covMeanDiffs.ipw, 1:length(covMeanDiffs.ipw), col = "blue", pch = 15)
+  points(covMeanDiffs.trunc, 1:length(covMeanDiffs.trunc), col = "red", pch = 17)
+  points(covMeanDiffs.trimmed, 1:length(covMeanDiffs.trimmed), col = "green", pch = 18)
+  # points(std.cov.vals.trim.matched.11, 1:length(std.cov.vals.trim.matched.11), col = "orange", pch = 25)
+  # points(std.cov.vals.caliper.11, 1:length(std.cov.vals.caliper.11), col = "lightblue", pch = 7)
+  abline(v = 0, col = "gray")
+  abline(v = 0.1, col = "red", lty = 2)
+  abline(v = -0.1, col = "red", lty = 2)
+  
+  axis(side=2, at=1:length(std.cov.vals.unmatched), labels = names(std.cov.vals.unmatched), las = 1, cex.axis = 0.75)
+  legend("top", inset=c(0,-0.15), horiz = TRUE, xpd=TRUE, bty="n",
+    legend = c("Full Data", "IPW", "Truncated IPW", "Trimmed IPW"),
+    col = c("black", "blue", "red", "green"),
+    pch = c(16, 15, 17, 18))
+  
+
+  in.matched.trimmed.i = which(match.data.object$weights == 1)
+  in.matched.caliper.i = as.numeric(which(match.data.object.caliper$weights == 1))
+  
+  in.matched.trimmed = rep(0, nrow(marchMadnessData))
+  in.matched.caliper = rep(0, nrow(marchMadnessData))
+  
+  for (i in 1:nrow(marchMadnessData)){
+    if (i %in% in.matched.trimmed.i){
+      in.matched.trimmed[i] = 1
+    }
+    if (i %in% in.matched.caliper.i){
+      in.matched.caliper[i] = 1
+    }
+  }
+  
+  marchMadnessDataMatchInds = marchMadnessData %>% 
+    mutate(in_matched_and_trimmed = in.matched.trimmed,
+           in_matched_caliper = in.matched.caliper)
+  
+  print("Checking Matched Biasness")
+  print(summary(glm(in_matched_and_trimmed ~ .-PointDiff-higher.seed.hot-in_matched_caliper,
+  data = marchMadnessDataMatchInds, family = "binomial")))
+  print(summary(glm(in_matched_caliper ~ .-PointDiff-higher.seed.hot-in_matched_and_trimmed,
+  data = marchMadnessDataMatchInds, family = "binomial")))
+
+
+  # pairs(marchMadnessData.caliper.matched[,1:8])
+  # pairs(marchMadnessData.caliper.matched[,c(1,2, 9:18)])
+  # pairs(marchMadnessData.caliper.matched[,c(1,2, 19:28)])
+  # pairs(marchMadnessData.caliper.matched[,c(1,2, 29:34)])
+  print("Results for the best-matched (will need to manually defined best.matched)")
+  if (best.matched == "Optimal"){
+    best.matched.data = marchMadnessDataMatchInds %>% 
+    filter(in_matched_and_trimmed == 1) %>% 
+    select(-c(in_matched_and_trimmed, in_matched_caliper))
+    best.data.for.est.and.cis = matchedData.11.trimmed
+    dataset.pc.analysis = original.dataset[in.matched.trimmed.i,]
+  } else if (best.matched == "Caliper"){
+    best.matched.data = marchMadnessDataMatchInds %>% 
+    filter(in_matched_caliper == 1) %>% 
+    select(-c(in_matched_and_trimmed, in_matched_caliper))
+    best.data.for.est.and.cis = matchedData.11.nearest.std
+    dataset.pc.analysis = original.dataset[in.matched.caliper.i,]
+
+    
+  }
+  print(summary(lm(PointDiff ~., data = best.matched.data)))
+
+  # print(summary(lm(best.matched.data$PC3 ~., data = dataset.chosen[in.matched.trimmed.i,])))
+  # print(summary(lm(best.matched.data$PC10 ~., data = dataset.chosen[in.matched.trimmed.i,])))
+# summary(lm(best.matched.data$PC11 ~., data = dataset.chosen[in.matched.trimmed.i,]))
+# summary(lm(best.matched.data$PC15 ~., data = dataset.chosen[in.matched.trimmed.i,]))
+# summary(lm(best.matched.data$PC32 ~., data = dataset.chosen[in.matched.trimmed.i,]))
+# summary(lm(best.matched.data$PC36 ~., data = dataset.chosen[in.matched.trimmed.i,]))
+# summary(lm(best.matched.data$PC40 ~., data = dataset.chosen[in.matched.trimmed.i,]))
+
+  getMeanDiff = function(data){
+  	est = mean(data$PointDiff[data$higher.seed.hot == 1]) - mean(data$PointDiff[data$higher.seed.hot == 0])
+  	return(est)
+  }
+  
+  
+  # we redefine matchedData.11 such that the re78 variable is now in the dataframe
+  
+  subclasses = unique(best.data.for.est.and.cis$subclass)
+  J = length(subclasses)
+  
+  pairedDiffs = vector(length = J)
+  for(j in 1:J){
+    pairedDiffs[j] = getMeanDiff(data = subset(best.data.for.est.and.cis, subclass == as.numeric(subclasses[j])))
+  }
+  
+  
+  est = getMeanDiff(best.data.for.est.and.cis)
+  var.est.paired = var(pairedDiffs)/J
+  lower.bound = est - qnorm(0.975)*sqrt(var.est.paired)
+  upper.bound = est + qnorm(0.975)*sqrt(var.est.paired)
+  print(c("best matched est" = est, "low.ci" = lower.bound, "high.ci" = upper.bound))
+
+  # first_col = original.dataset[in.matched.trimmed.i,][higher.seed.hot == 1,]$PointDiff
+  # second_col = original.dataset[in.matched.trimmed.i,][higher.seed.hot == 0,]$PointDiff
+  # stopifnot(length(first_col) == length(second_col))
+  # y_sensitivity = matrix(data = c(first_col, second_col), ncol = 2)
+  # 
+  # print(senmw(y = y_sensitivity, gamma = 1, method = "t"))
+  # print(t.test(first_col, y = second_col, paired = TRUE))
+  # 
+  # gamma_vals = seq(1, 3, 0.1)
+  # p_values_sensitivity = sapply(gamma_vals, FUN = function(gamma){
+  #   p_val = senmw(y = y_sensitivity, gamma = gamma, method = "t")$pval
+  #   return(p_val)
+  # 
+  # })
+  set.seed(36318)
+
+  # plot(gamma_vals, p_values_sensitivity)
+  # abline(h = 0.05, lty = 2, col = "red")
+
+  getOutcomePlugIn = function(dataset){
+    lin.reg = lm(PointDiff ~ ., data = dataset)
+    dataset.t = dataset %>% 
+      mutate(higher.seed.hot = 1)
+    dataset.c = dataset %>% 
+      mutate(higher.seed.hot = 0)
+    muhat.t = predict(lin.reg, newdata = dataset.t)
+    muhat.c = predict(lin.reg, newdata = dataset.c)
+    
+    plug.in.estimator = mean(muhat.t) - mean(muhat.c)
+    return(plug.in.estimator)
+  }
+  
+  getOutcomePlugIn.all = function(dataset){
+    lin.reg = lm(PointDiff ~ ., data = dataset)
+    dataset.t = dataset %>% 
+      mutate(higher.seed.hot = 1)
+    dataset.c = dataset %>% 
+      mutate(higher.seed.hot = 0)
+    muhat.t = predict(lin.reg, newdata = dataset.t)
+    muhat.c = predict(lin.reg, newdata = dataset.c)
+    
+    plug.in.estimator = muhat.t - muhat.c
+    return(plug.in.estimator)
+  }
+  
+  
+  B = 1000
+  bootstrappedData = list()
+  pt.estimates.plugin = rep(NA, B)
+  for(i in 1:B){
+    sampled_rows.bin = sample(1:nrow(marchMadnessData), size = nrow(marchMadnessData), replace = TRUE)
+    bootstrappedData[[i]] = marchMadnessData[sampled_rows.bin, ]
+    pt.estimates.plugin[i] = getOutcomePlugIn(dataset = bootstrappedData[[i]]) 
+    # modified getOutcomePlugIn to accomodate for logistic reg
+  }
+  
+  
+  plugin.variance = var(pt.estimates.plugin)
+  
+  plug.in.est = getOutcomePlugIn(dataset = marchMadnessData) 
+  z.est = qnorm(0.975)
+  low.ci = plug.in.est - z.est * sqrt(plugin.variance)
+  high.ci = plug.in.est + z.est * sqrt(plugin.variance)
+  
+  print(c("plug.in.est" = plug.in.est, "low.ci" = low.ci, "high.ci" = high.ci))
+
+  # plug.in.ests = getOutcomePlugIn.all(marchMadnessData)
+  # print(summary(lm(plug.in.ests ~.-PointDiff, data = marchMadnessData)))
+
+  set.seed(36318)
+  getDREstAndCIs = function(dataset){
+    if(nrow(dataset) %% 2 != 0){
+      dataset = dataset[-c(sample(1:nrow(dataset), 1)),]
+    }
+    stopifnot(nrow(dataset) %% 2 == 0)
+    d1.rows = sample(1:nrow(dataset), nrow(dataset) / 2, replace = FALSE)
+    train = dataset[d1.rows,]
+    test = dataset[-c(d1.rows),]
+    lm.train = lm(PointDiff ~ ., data = train)
+    lm.test = lm(PointDiff ~ ., data = test)
+    psModel.train = glm(higher.seed.hot ~ .-PointDiff, data = train, family = "binomial")
+    psModel.test = glm(higher.seed.hot ~ .-PointDiff, data = test, family = "binomial")
+  
+    dataset.test.t = test %>% 
+      mutate(higher.seed.hot = 1)
+    dataset.test.c = test %>% 
+      mutate(higher.seed.hot = 0)
+    
+    dataset.train.t = train %>% 
+      mutate(higher.seed.hot = 1)
+    dataset.train.c = train %>% 
+      mutate(higher.seed.hot = 0)
+    
+    mu.1.doubly = predict(lm.train,  type = "response", newdata = dataset.test.t)
+    mu.0.doubly = predict(lm.train,  type = "response", newdata = dataset.test.c)
+    ps.doubly = fitted(psModel.train, newdata = test, type = "response")
+    z.doubly = test$higher.seed.hot
+    y.doubly = test$PointDiff
+    
+    mu.1.doubly.flipped = predict(lm.test,  type = "response", newdata = dataset.train.t)
+    
+    mu.0.doubly.flipped = predict(lm.test,  type = "response", newdata = dataset.train.c)
+    ps.doubly.flipped = fitted(psModel.test, newdata = train, type = "response")
+    z.doubly.flipped = train$higher.seed.hot
+    y.doubly.flipped = train$PointDiff
+  
+  
+    doubly.robust.estimate = mean((mu.1.doubly - (z.doubly * (y.doubly - mu.1.doubly))/ps.doubly)
+                                  - (mu.0.doubly - ((1-z.doubly) * (y.doubly - mu.0.doubly))/(1-ps.doubly)))
+    
+    doubly.robust.estimate.flipped = mean((mu.1.doubly.flipped - (z.doubly.flipped * (y.doubly.flipped - mu.1.doubly.flipped))/ps.doubly.flipped)
+                                  - (mu.0.doubly.flipped - ((1-z.doubly.flipped) * (y.doubly.flipped - mu.0.doubly.flipped))/(1-ps.doubly.flipped)))
+    
+  
+    mu.1.combined = c(mu.1.doubly, mu.1.doubly.flipped)
+    mu.0.combined = c(mu.0.doubly, mu.0.doubly.flipped)
+    ps.combined = c(ps.doubly, ps.doubly.flipped)
+  
+    names(mu.1.combined) <- as.numeric(names(mu.1.combined))
+    names(mu.0.combined) <- as.numeric(names(mu.0.combined))
+    names(ps.combined) <- as.numeric(names(ps.combined))
+    
+    # names.df = data.frame(mu.1 = as.numeric(names(mu.1.combined)), mu.0 = as.numeric(names(mu.0.combined)), ps = as.numeric(names(ps.combined)))
+    # print(names.df %>%
+    #   arrange(ps))
+    
+    # why is this NA?
+    ps.combined = na.omit(ps.combined[as.character(1:length(ps.combined))])
+    mu.1.combined = na.omit(mu.1.combined[as.character(1:length(mu.1.combined))])
+    mu.0.combined = na.omit(mu.0.combined[as.character(1:length(mu.0.combined))])
+  
+    
+  
+  
+    stopifnot(all(names(mu.1.combined) == names(mu.0.combined)) & all(names(ps.combined) == names(mu.0.combined)))
+    
+    dataset.doubly.combined = dataset[names(mu.0.combined), ]
+    z.doubly.combined = dataset.doubly.combined$higher.seed.hot
+    y.doubly.combined = dataset.doubly.combined$PointDiff
+    # 
+    doubly.robust.estimate.combined = ((mu.1.combined - 
+                                     ((z.doubly.combined * 
+                                        (y.doubly.combined - mu.1.combined))/
+                                     ps.combined))
+                                  - (mu.0.combined - 
+                                       (((1-z.doubly.combined) * 
+                                          (y.doubly.combined - mu.0.combined))/
+                                       (1-ps.combined))))
+    mean.doubly.robust.estimate.combined = mean(doubly.robust.estimate.combined)
+    doubly.robust.var.combined = var(doubly.robust.estimate.combined)/
+      nrow(dataset.doubly.combined)
+    low.ci = mean.doubly.robust.estimate.combined - qnorm(0.975)*sqrt(doubly.robust.var.combined)
+    high.ci =  mean.doubly.robust.estimate.combined + qnorm(0.975)*sqrt(doubly.robust.var.combined)
+    return(c("doubly-robust estimator est" = mean.doubly.robust.estimate.combined, "low_ci" = low.ci, "high_ci" = high.ci))
+  }
+  
+
+
+
+  print(summary(lm(PointDiff ~., data = marchMadnessData[trimmed_i,], weights = psWeights.trimmed)))
+  print("Nonzero weights Amount")
+  print(length(which(psWeights.trimmed > 0.001)))
+  doubly.robust = getDREstAndCIs(marchMadnessData)
+  print("doubly robust:")
+  print(doubly.robust)
+
+  if(want.ipw){
+    return(list("weights" = psWeights.trimmed, "dataset" = marchMadnessData[trimmed_i,], "original.dataset" = original.dataset[trimmed_i,]))
+  }
+  
+  if (want.matched.data){
+    return(list("matched.data" = best.matched.data, "pc.analysis.interp" = dataset.pc.analysis))
+  }
+
+}
+matched.data.all = causal_inference_analysis(marchMadnessData.all_seeds.pca_filtered, marchMadnessData.all_seeds, best.matched = "Caliper", want.matched.data = T)
+ipw.all = causal_inference_analysis(marchMadnessData.all_seeds.pca_filtered, marchMadnessData.all_seeds, best.matched = "Caliper", want.ipw = T)
+```
+```{r}
+# matched.data.reasonable = causal_inference_analysis(pca_filter(marchMadnessData.no_reduction.upset_reachable, visualize = TRUE), marchMadnessData.no_reduction.upset_reachable, best.matched = "Caliper", want.matched.data = T)
+# ipw.reasonable = causal_inference_analysis(pca_filter(marchMadnessData.no_reduction.upset_reachable), marchMadnessData.no_reduction.upset_reachable, best.matched = "Caliper", want.ipw = T)
+summary(lm(marchMadnessData.all_seeds))
+```
+
+```{r}
+# matched.data.favorite = causal_inference_analysis(pca_filter(marchMadnessData.no_reduction.favorite_dominant, visualize = TRUE), marchMadnessData.no_reduction.favorite_dominant, best.matched = "Optimal", want.matched.data = T)
+# ipw.favorite = causal_inference_analysis(pca_filter(marchMadnessData.no_reduction.favorite_dominant), marchMadnessData.no_reduction.favorite_dominant, best.matched = "Optimal", want.ipw = T)
+
+```
+
+```{r}
+# matched.data.possible = causal_inference_analysis(pca_filter(marchMadnessData.no_reduction.unlikely_but_possible, visualize = TRUE), 
+#                           marchMadnessData.no_reduction.unlikely_but_possible,
+#                           best.matched = "Optimal", want.matched.data = T)
+# ipw.possible = causal_inference_analysis(pca_filter(marchMadnessData.no_reduction.unlikely_but_possible), 
+#                           marchMadnessData.no_reduction.unlikely_but_possible,
+#                           best.matched = "Optimal", want.ipw = T)
+```
+
+```{r}
+matched.data.all$matched.data
+
+```
+
+
+```{r}
+#TODO: get the matched datasets and the ipw weights to potentially infer on the PCs
+# --> categorize PCs
+
+gam.matched = gam(as.formula(paste0("PointDiff~",paste0("s(PC",1:32,")",collapse="+"),"+ I(higher.seed.hot)")), data = matched.data.all$matched.data, method = "REML")
+summary(gam.matched)
+gam.check(gam.matched)
+get_pc_analysis = function(dataset, original.dataset, weights = NULL){
+  if(is.null(weights)){
+    weights = rep(1, nrow(dataset))
+  }
+  
+  lm.model = lm(PointDiff ~., data = dataset, weights = weights)
+  plot(lm.model)
+  results.raw = summary(lm.model)$coefficients
+  print(summary(lm(PointDiff ~., data = dataset, weights = weights)))
+  results = data.frame(results.raw) %>% 
+    mutate(p.value = `Pr...t..`) %>% 
+    select(-c(`Pr...t..`))
+  results = results[2:nrow(results), ] # not concerned about the intercept
+  print(results %>% 
+          filter(p.value < 0.05))
+
+  principal.components = rownames(results)[which(results$p.value < 0.05)]
+  
+  print(principal.components)
+  if(length(principal.components) == 0){
+    print("No principal components found of statistical significance")
+    return(NULL)
+  }
+  for (principal.component in principal.components){
+    pc.results = data.frame(summary(lm(as.numeric(dataset[,principal.component]) ~., data = original.dataset))$coefficients)
+    pc.results = pc.results %>% mutate(p.value = `Pr...t..`) %>% 
+    select(-c(`Pr...t..`))
+    pc.results = pc.results[2:nrow(pc.results), ]
+    pc.results.vis = pc.results %>% 
+      mutate(abs.estimate = abs(Estimate)) %>% 
+      arrange(desc(abs.estimate)) %>% 
+      select(Estimate)
+    print(pc.results.vis)
+  }
+  
+}
+
+pairs(matched.data.all$matched.data[25:ncol(matched.data.all$matched.data)], panel = panel.smooth)
+
+pairs(matched.data.all$matched.data[c(20:25, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(15:20, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(10:15, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(5:10, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(1:5, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+
+get_pc_analysis(matched.data.all$matched.data, matched.data.all$pc.analysis.interp)
+```
+
+```{r}
+# get_pc_analysis(matched.data.reasonable$matched.data, matched.data.reasonable$pc.analysis.interp)
+```
+
+```{r}
+pairs(matched.data.all$matched.data[25:ncol(matched.data.all$matched.data)], panel = panel.smooth)
+
+pairs(matched.data.all$matched.data[c(20:25, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(15:20, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(10:15, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(5:10, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+pairs(matched.data.all$matched.data[c(1:5, (ncol(matched.data.all$matched.data)-1))], panel = panel.smooth)
+
+gam.ipw = gam(as.formula(paste0("PointDiff~",paste0("s(PC",1:32,")",collapse="+"),"+ I(higher.seed.hot)")), data = ipw.all$dataset, weights = ipw.all$weights, method = "REML")
+summary(gam.ipw)
+gam.check(gam.ipw)
+
+get_pc_analysis(ipw.all$dataset, ipw.all$original.dataset, ipw.all$weights)
+
+```
+
