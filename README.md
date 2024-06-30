@@ -5,4 +5,6 @@ This repository contains all the code used in my project in the class 36-318: In
 Since this project was locally ran on my computer, you'll need to download the dataset yourself and change the directory filepaths. For accessing the dataset, you can get that here:
 https://www.kaggle.com/competitions/march-machine-learning-mania-2023
 
-Feel free to experiment with both the Men's and Women's March Madness datasets as well as more years as time progresses! :)
+Feel free to experiment with both the Men's and Women's March Madness datasets and more up-to-date datasets! :)
+
+Paper discussing findings from this project: https://drive.google.com/file/d/1pf4xQK9iJrL3-yDFMtk4KFITM7CWW5OP/view
